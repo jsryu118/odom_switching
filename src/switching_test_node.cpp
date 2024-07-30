@@ -48,9 +48,6 @@ class SwitchingNode {
         if (!log_file_.is_open()) {
             ROS_ERROR("Failed to open log file!");
         }
-        nh.param("num_stable_threshold", num_stable_threshold, 5);
-
-        stable_count=0;
         ////////////////// TF ///////////////////////  
         nh.param("pub_tf", pub_tf, false);
         nh.param<std::string>("frame_id", frame_id, "map");
@@ -86,9 +83,10 @@ class SwitchingNode {
     nav_msgs::Odometry gq7_odom;
     nav_msgs::Odometry eskf_odom;
     std::ofstream log_file_;
+    int num_switching = 0;
+    int num_switching_threshold = 300; // 100hz x 3sec
     bool pub_tf;
     std::string frame_id, child_frame_id;
-    int stable_count, num_stable_threshold;
 };
 
 void SwitchingNode::logger(bool stable_flag) {
@@ -112,29 +110,20 @@ void SwitchingNode::logger(bool stable_flag) {
 void SwitchingNode::status_callback(const microstrain_inertial_msgs::HumanReadableStatusConstPtr &status_msg) {
     int num_status = status_msg->status_flags.size();
     std::string first_status = status_msg->status_flags[0];
-    std::string stable_status = "\"Stable\""; // 따옴표를 그대로 사용
+    std::string stable_status = "\"Stable\"";
 
-    if (num_status == 1 && first_status == stable_status) {
-        if (!is_stable_){
-            stable_count++;    
-        }
-        if (stable_count >= num_stable_threshold) {
-            if (!is_stable_){
-                is_stable_ = true;
-            }
-        }
-        logger(is_stable_);
-
-    } else {
-        stable_count = 0;
-        if (is_stable_){
-            is_stable_ = false;
-        }
-        logger(is_stable_);
-        // std::cout << "unstable" << std::endl;
-    }
+    // if (num_status == 1 && first_status == stable_status){
+    //     is_stable_= true;
+    //     logger(is_stable_);
+    // }
+    // else{
+    //     is_stable_= false;
+    //     logger(is_stable_);
+    //     std::cout << "unstable" << std::endl;
+    // }
 }
 void SwitchingNode::state_publisher(const nav_msgs::OdometryConstPtr &sub_odom_msg) {
+
     nav_msgs::Odometry pub_odom_msg = *sub_odom_msg;
 
     geometry_msgs::PoseStamped pose_msg;
@@ -143,6 +132,7 @@ void SwitchingNode::state_publisher(const nav_msgs::OdometryConstPtr &sub_odom_m
     pose_msg.header = pub_odom_msg.header;
     pose_msg.header.frame_id = "map";
     pose_msg.pose = pub_odom_msg.pose.pose;
+    // pose_pub_.publish(pose_msg);
     vel_msg.header = pub_odom_msg.header;
     vel_msg.twist = pub_odom_msg.twist.twist;
     vel_msg.header.frame_id = "map";
@@ -150,6 +140,7 @@ void SwitchingNode::state_publisher(const nav_msgs::OdometryConstPtr &sub_odom_m
     odom_pub_.publish(pub_odom_msg);
     pose_pub_.publish(pose_msg);
     vel_pub_.publish(vel_msg);
+
     // broadcast tf
     if (pub_tf){
         tf::Transform tf_transform;
@@ -167,6 +158,14 @@ void SwitchingNode::state_publisher(const nav_msgs::OdometryConstPtr &sub_odom_m
         tf_transform.setRotation(tf_quat);
         tf_broadcaster_.sendTransform(tf::StampedTransform(tf_transform, pub_odom_msg.header.stamp, frame_id, child_frame_id));
     }
+    num_switching += 1;
+
+    if (num_switching == num_switching_threshold){
+        num_switching = 0;
+        is_stable_ = !is_stable_;
+
+    }
+
 }
 
 void SwitchingNode::gq7_callback(const nav_msgs::OdometryConstPtr &gq7_msg) {

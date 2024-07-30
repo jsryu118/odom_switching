@@ -145,6 +145,11 @@ include_directories(
 # With catkin_make all packages are built within a single CMake context
 # The recommended prefix ensures that target names across packages don't collide
 add_executable(${PROJECT_NAME}_node src/switching_node.cpp)
+add_executable(${PROJECT_NAME}_test_node src/switching_test_node.cpp)
+add_executable(${PROJECT_NAME}_kf_node src/switching_kf_node.cpp)
+add_executable(${PROJECT_NAME}_test_kf_node src/switching_test_kf_node.cpp)
+add_executable(${PROJECT_NAME}_manual_kf_node src/switching_manual_kf_node.cpp)
+
 # add_executable(${PROJECT_NAME}_dual_node src/imu_gnss_fusion_dual_node_ryu.cpp)
 
 ## Rename C++ executable without prefix
@@ -153,6 +158,11 @@ add_executable(${PROJECT_NAME}_node src/switching_node.cpp)
 ## e.g. "rosrun someones_pkg node" instead of "rosrun someones_pkg someones_pkg_node"
 # set_target_properties(${PROJECT_NAME}_node PROPERTIES OUTPUT_NAME node PREFIX "")
 set_target_properties(${PROJECT_NAME}_node PROPERTIES COMPILE_DEFINITIONS EIGEN_NO_MALLOC)
+set_target_properties(${PROJECT_NAME}_test_node PROPERTIES COMPILE_DEFINITIONS EIGEN_NO_MALLOC)
+set_target_properties(${PROJECT_NAME}_kf_node PROPERTIES COMPILE_DEFINITIONS EIGEN_NO_MALLOC)
+set_target_properties(${PROJECT_NAME}_test_kf_node PROPERTIES COMPILE_DEFINITIONS EIGEN_NO_MALLOC)
+set_target_properties(${PROJECT_NAME}_manual_kf_node PROPERTIES COMPILE_DEFINITIONS EIGEN_NO_MALLOC)
+
 # set_target_properties(${PROJECT_NAME}_dual_node PROPERTIES COMPILE_DEFINITIONS EIGEN_NO_MALLOC)
 ## Add cmake target dependencies of the executable
 ## same as for the library above
@@ -160,6 +170,26 @@ set_target_properties(${PROJECT_NAME}_node PROPERTIES COMPILE_DEFINITIONS EIGEN_
 
 # Specify libraries to link a library or executable target against
 target_link_libraries(${PROJECT_NAME}_node
+  ${catkin_LIBRARIES}
+  ${GeographicLib_LIBRARIES}
+)
+
+target_link_libraries(${PROJECT_NAME}_test_node
+  ${catkin_LIBRARIES}
+  ${GeographicLib_LIBRARIES}
+)
+
+target_link_libraries(${PROJECT_NAME}_kf_node
+  ${catkin_LIBRARIES}
+  ${GeographicLib_LIBRARIES}
+)
+
+target_link_libraries(${PROJECT_NAME}_test_kf_node
+  ${catkin_LIBRARIES}
+  ${GeographicLib_LIBRARIES}
+)
+
+target_link_libraries(${PROJECT_NAME}_manual_kf_node
   ${catkin_LIBRARIES}
   ${GeographicLib_LIBRARIES}
 )

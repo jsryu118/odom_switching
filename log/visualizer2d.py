@@ -1,7 +1,11 @@
 import matplotlib.pyplot as plt
+import os
 
-# 데이터 파일 읽기
-file_path = 'odom_log.txt'
+# 현재 스크립트의 디렉토리 경로를 가져오기
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+# odom_log.txt 파일 경로를 설정
+file_path = os.path.join(script_dir, 'odom_log.txt')
 
 # 데이터 읽기
 data = []
@@ -14,7 +18,8 @@ with open(file_path, 'r') as file:
         data.append((color, x, y))
 
 # 색상 설정
-colors = ['red' if point[0] == 0 else 'blue' for point in data]
+color_map = {0: 'red', 1: 'blue', 2: 'purple', 3: 'green'}
+colors = [color_map.get(point[0], 'black') for point in data]
 
 # x, y 좌표 추출
 x_coords = [point[1] for point in data]
