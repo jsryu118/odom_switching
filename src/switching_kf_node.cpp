@@ -1,4 +1,5 @@
 #include <nav_msgs/Odometry.h>
+#include <std_msgs/Bool.h>
 #include <ros/ros.h>
 
 #include <deque>
@@ -15,9 +16,10 @@ namespace ryu {
 class SwitchingNode {
    public:
     SwitchingNode(ros::NodeHandle &nh) {
-        std::string topic_gq7_status, topic_lio_status, topic_gq7, topic_lio, topic_eskf, topic_pubodom, topic_pubpose, topic_pubvel, log_path; 
+        std::string topic_gq7_status, topic_lio_status, topic_gnss_status, topic_gq7, topic_lio, topic_eskf, topic_pubodom, topic_pubpose, topic_pubvel, log_path; 
         nh.param<std::string>("topic_gq7_status", topic_gq7_status, "/ekf/status");
         nh.param<std::string>("topic_lio_status", topic_lio_status, "/ekf/status");
+        nh.param<std::string>("topic_gnss_status", topic_gnss_status, "/gnss/status");
         nh.param<std::string>("topic_gq7", topic_gq7, "/ekf/odometry_map");
         nh.param<std::string>("topic_eskf", topic_eskf, "/eskf/odom");
         nh.param<std::string>("topic_pubodom", topic_pubodom, "/switching_result");
@@ -30,6 +32,7 @@ class SwitchingNode {
         // ROS sub & pub
         gq7_status_sub_ = nh.subscribe(topic_gq7_status, 10, &SwitchingNode::gq7_status_callback, this);
         lio_status_sub_ = nh.subscribe(topic_lio_status, 10, &SwitchingNode::lio_status_callback, this);
+        gnss_status_sub_ = nh.subscribe(topic_gnss_status, 10, &SwitchingNode::gnss_status_callback, this);
         gq7_sub_ = nh.subscribe(topic_gq7, 10, &SwitchingNode::gq7_callback, this);
         lio_sub_ = nh.subscribe(topic_lio, 10, &SwitchingNode::lio_callback, this);
         eskf_sub_ = nh.subscribe(topic_eskf, 10, &SwitchingNode::eskf_callback, this);
@@ -66,43 +69,56 @@ class SwitchingNode {
         nh.param("pub_tf", pub_tf, false);
         nh.param<std::string>("frame_id", frame_id, "map");
         nh.param<std::string>("child_frame_id", child_frame_id, "base_link");
+
+        double publish_rate;
+        nh.param("publish_rate", publish_rate, 100.0);  // 기본값 10Hz
+        timer_ = nh.createTimer(ros::Duration(1.0 / publish_rate), &SwitchingNode::timerCallback, this);
     }
 
     ~SwitchingNode() {
-        if (log_file_.is_open()) {
-            log_file_.close();
-        }
     }
 
     void gq7_status_callback(const microstrain_inertial_msgs::HumanReadableStatusConstPtr &gq7_status_msg);
     void lio_status_callback(const microstrain_inertial_msgs::HumanReadableStatusConstPtr &lio_status_msg);
-    void state_publisher(const nav_msgs::OdometryConstPtr &odom_msg);
+    void gnss_status_callback(const std_msgs::Bool &gnss_status_msg);
+    void state_publisher(const nav_msgs::Odometry &odom_msg);
+    void kf_state_publisher(const nav_msgs::Odometry &odom_msg);
     void gq7_callback(const nav_msgs::OdometryConstPtr &gq7_msg);
     void lio_callback(const nav_msgs::OdometryConstPtr &lio_msg);
     void eskf_callback(const nav_msgs::OdometryConstPtr &eskf_msg);
     void logger(bool stable_flag);
     void logger_single(int state_flag, const nav_msgs::OdometryConstPtr &odom_msg);
+    void timerCallback(const ros::TimerEvent& event);
+    int state_checker();
 
-    void prepare_kf(const nav_msgs::OdometryConstPtr& odom_msg);
+    void prepare_kf(const nav_msgs::Odometry& odom_msg);
 
-    nav_msgs::Odometry apply_kf(const nav_msgs::OdometryConstPtr& odom_msg);
+    nav_msgs::Odometry apply_kf(const nav_msgs::Odometry& odom_msg);
 
    private:
     ros::Subscriber gq7_status_sub_;
     ros::Subscriber gq7_sub_;
     ros::Subscriber lio_status_sub_;
+    ros::Subscriber gnss_status_sub_;
+    
     ros::Subscriber lio_sub_;
     ros::Subscriber eskf_sub_;
     ros::Publisher odom_pub_;
     ros::Publisher pose_pub_;
     ros::Publisher vel_pub_;
+    ros::Timer timer_; 
+
     tf::TransformBroadcaster tf_broadcaster_;
 
     bool is_initialized_gq7_ = false;
     bool is_initialized_lio_ = false;
     bool is_initialized_eskf_ = false;
-    bool is_stable_ = false;
+    bool is_gq7_stable_ = false;
+    bool is_eskf_stable_ = true;
+    bool is_lio_stable_ = false;
+    bool is_gnss_stable_ = true;
     bool is_stable_switching_ = true;
+
 
     nav_msgs::Odometry gq7_odom;
     nav_msgs::Odometry eskf_odom;
@@ -119,27 +135,34 @@ class SwitchingNode {
     bool pub_tf;
     std::string frame_id, child_frame_id;
 
-    std::deque<nav_msgs::OdometryConstPtr> gq7_odom_buf_;
-    std::deque<nav_msgs::OdometryConstPtr> lio_odom_buf_;
-    std::deque<nav_msgs::OdometryConstPtr> eskf_odom_buf_;
     bool is_stable_before_=false;
 
-
+    const int CURRENTSTATELIO = 1;
+    const int CURRENTSTATEGQ7 = 2;
+    const int CURRENTSTATEESKF = 3;
+    const int LIO2GQ7 = 4;
+    const int LIO2ESKF = 5;
+    const int GQ72ESKF = 6;
+    const int GQ72LIO = 7;
+    const int ESKF2GQ7 = 8;
+    const int ESKF2LIO = 9;
+    int current_state = -1;
+    int current_changing_state = 0;
 };
 
-void SwitchingNode::prepare_kf(const nav_msgs::OdometryConstPtr& odom_msg) {
+void SwitchingNode::prepare_kf(const nav_msgs::Odometry& odom_msg) {
     auto& state = kf_ptr_->state_ptr_->x;
-    last_t = odom_msg->header.stamp.toSec();
-    state(0) = odom_msg->pose.pose.position.x;
-    state(1) = odom_msg->pose.pose.position.y;
-    state(2) = odom_msg->pose.pose.position.z;
-    state(3) = odom_msg->twist.twist.linear.x;
-    state(4) = odom_msg->twist.twist.linear.y;
-    state(5) = odom_msg->twist.twist.linear.z;
+    last_t = odom_msg.header.stamp.toSec();
+    state(0) = odom_msg.pose.pose.position.x;
+    state(1) = odom_msg.pose.pose.position.y;
+    state(2) = odom_msg.pose.pose.position.z;
+    state(3) = odom_msg.twist.twist.linear.x;
+    state(4) = odom_msg.twist.twist.linear.y;
+    state(5) = odom_msg.twist.twist.linear.z;
 }
 
-nav_msgs::Odometry SwitchingNode::apply_kf(const nav_msgs::OdometryConstPtr& odom_msg) {
-    double dt = odom_msg->header.stamp.toSec() - last_t;
+nav_msgs::Odometry SwitchingNode::apply_kf(const nav_msgs::Odometry& odom_msg) {
+    double dt = odom_msg.header.stamp.toSec() - last_t;
     if (dt < DBL_EPSILON) dt = 0.0001;
     Eigen::Matrix<double, kStateDim, kStateDim> F = Eigen::Matrix<double, kStateDim, kStateDim>::Identity();
     F.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity() * dt; // Position to velocity
@@ -162,12 +185,12 @@ nav_msgs::Odometry SwitchingNode::apply_kf(const nav_msgs::OdometryConstPtr& odo
     R.block<3, 3>(3, 3) *= 0.01;  // Velocity noise
 
     Eigen::Matrix<double, 6, 1> z;
-    z.block<3, 1>(0, 0) = Eigen::Vector3d(odom_msg->pose.pose.position.x, odom_msg->pose.pose.position.y, odom_msg->pose.pose.position.z);
-    z.block<3, 1>(3, 0) = Eigen::Vector3d(odom_msg->twist.twist.linear.x, odom_msg->twist.twist.linear.y, odom_msg->twist.twist.linear.z);
+    z.block<3, 1>(0, 0) = Eigen::Vector3d(odom_msg.pose.pose.position.x, odom_msg.pose.pose.position.y, odom_msg.pose.pose.position.z);
+    z.block<3, 1>(3, 0) = Eigen::Vector3d(odom_msg.twist.twist.linear.x, odom_msg.twist.twist.linear.y, odom_msg.twist.twist.linear.z);
 
     kf_ptr_->update(H, R, z);
     const auto& state = kf_ptr_->state_ptr_->x;
-    nav_msgs::Odometry kf_odom_msg= *odom_msg;
+    nav_msgs::Odometry kf_odom_msg= odom_msg;
     kf_odom_msg.pose.pose.position.x = state(0);
     kf_odom_msg.pose.pose.position.y = state(1);
     kf_odom_msg.pose.pose.position.z = state(2);
@@ -177,136 +200,157 @@ nav_msgs::Odometry SwitchingNode::apply_kf(const nav_msgs::OdometryConstPtr& odo
     last_t = kf_odom_msg.header.stamp.toSec();
 
     // Calculate the difference between state and odom_msg
-    double dx = state(0) - odom_msg->pose.pose.position.x;
-    double dy = state(1) - odom_msg->pose.pose.position.y;
-    double dz = state(2) - odom_msg->pose.pose.position.z;
+    double dx = state(0) - odom_msg.pose.pose.position.x;
+    double dy = state(1) - odom_msg.pose.pose.position.y;
+    double dz = state(2) - odom_msg.pose.pose.position.z;
 
     // Calculate the parameter as the squared sum of differences
     double param = dx*dx + dy*dy + dz*dz;
     if (param < switching_stable_threshold){
         std::cout<< "converged" <<std::endl;
         is_stable_switching_ = true;
+        current_changing_state = 0;
     }
     return kf_odom_msg;
-}
-
-
-void SwitchingNode::logger(bool stable_flag) {
-    if (log_file_.is_open()) {
-        if (stable_flag) {
-            log_file_ << stable_flag << " "
-                      << gq7_odom.pose.pose.position.x << " "
-                      << gq7_odom.pose.pose.position.y << " "
-                      << gq7_odom.pose.pose.position.z << std::endl;
-        } else {
-            if (is_initialized_eskf_){
-            log_file_ << stable_flag << " "
-                      << eskf_odom.pose.pose.position.x << " "
-                      << eskf_odom.pose.pose.position.y << " "
-                      << eskf_odom.pose.pose.position.z << std::endl;
-            }
-        }
-    }
-}
-
-void SwitchingNode::logger_single(int state_flag, const nav_msgs::OdometryConstPtr &odom_msg) {
-    if (log_file_.is_open()) {
-        log_file_ << state_flag << " "
-                << odom_msg->pose.pose.position.x << " "
-                << odom_msg->pose.pose.position.y << " "
-                << odom_msg->pose.pose.position.z << std::endl;
-    }
 }
 
 void SwitchingNode::gq7_status_callback(const microstrain_inertial_msgs::HumanReadableStatusConstPtr &gq7_status_msg) {
     int num_status = gq7_status_msg->status_flags.size();
     std::string first_status = gq7_status_msg->status_flags[0];
     std::string stable_status = "\"Stable\""; // 따옴표를 그대로 사용
-    is_stable_before_ = is_stable_;
+    is_stable_before_ = is_gq7_stable_;
     if (num_status == 1 && first_status == stable_status) {
-        if (!is_stable_){
+        if (!is_gq7_stable_){
             stable_count++;    
         }
         if (stable_count >= num_stable_threshold) {
-            if (!is_stable_){
-                is_stable_ = true;
+            if (!is_gq7_stable_){
+                is_gq7_stable_ = true;
                 is_stable_switching_ = false;
             }
         }
-        logger(is_stable_);
+        // logger(is_gq7_stable_);
 
     } else {
         stable_count = 0;
-        if (is_stable_){
-            is_stable_ = false;
+        if (is_gq7_stable_){
+            is_gq7_stable_ = false;
             is_stable_switching_ = false;
         }
-        logger(is_stable_);
+        // logger(is_gq7_stable_);
         // std::cout << "unstable" << std::endl;
     }
+    current_changing_state = state_checker();
+}
 
-    if(is_stable_before_ && !is_stable_){
-        auto gq7_buf_copy = gq7_odom_buf_;
-        auto eskf_buf_copy = eskf_odom_buf_;
-        for (const auto gq7_odom : gq7_odom_buf_) {
-            logger_single(2, gq7_odom);
+int SwitchingNode::state_checker() {
+    int previous_state = current_state;
+    if(is_lio_stable_) current_state = CURRENTSTATELIO;
+    else{
+        if(is_gnss_stable_){
+            if(is_gq7_stable_) current_state = CURRENTSTATEGQ7;
+            else if(is_eskf_stable_) current_state = CURRENTSTATEESKF;
         }
-        for (const auto eskf_odom : eskf_odom_buf_) {
-            logger_single(3, eskf_odom);
-        }
+        else current_state = CURRENTSTATELIO;
     }
-    gq7_odom_buf_.clear();
-    eskf_odom_buf_.clear();
+
+    if(previous_state==CURRENTSTATELIO && current_state==CURRENTSTATEESKF) return LIO2ESKF;
+    else if(previous_state==CURRENTSTATELIO && current_state==CURRENTSTATEGQ7) return LIO2GQ7;
+    else if(previous_state==CURRENTSTATEESKF && current_state==CURRENTSTATELIO) return ESKF2LIO;
+    else if(previous_state==CURRENTSTATEESKF && current_state==CURRENTSTATEGQ7) return ESKF2GQ7;
+    else if(previous_state==CURRENTSTATEGQ7 && current_state==CURRENTSTATELIO) return GQ72LIO;
+    else if(previous_state==CURRENTSTATEGQ7 && current_state==CURRENTSTATEESKF) return GQ72ESKF;
+    else return 0;
 }
 
 void SwitchingNode::lio_status_callback(const microstrain_inertial_msgs::HumanReadableStatusConstPtr &lio_status_msg) {
-    // int num_status = lio_status_msg->status_flags.size();
-    // std::string first_status = lio_status_msg->status_flags[0];
-    // std::string stable_status = "\"Stable\""; // 따옴표를 그대로 사용
-    // is_stable_before_ = is_stable_;
-    // if (num_status == 1 && first_status == stable_status) {
-    //     if (!is_stable_){
-    //         stable_count++;    
-    //     }
-    //     if (stable_count >= num_stable_threshold) {
-    //         if (!is_stable_){
-    //             is_stable_ = true;
-    //             is_stable_switching_ = false;
-    //         }
-    //     }
-    //     logger(is_stable_);
 
-    // } else {
-    //     stable_count = 0;
-    //     if (is_stable_){
-    //         is_stable_ = false;
-    //         is_stable_switching_ = false;
-    //     }
-    //     logger(is_stable_);
-    //     // std::cout << "unstable" << std::endl;
-    // }
+    is_lio_stable_ = true;
+    // is_lio_stable_ = lio_status_msg->;
 
-    // if(is_stable_before_ && !is_stable_){
-    //     auto gq7_buf_copy = gq7_odom_buf_;
-    //     auto eskf_buf_copy = eskf_odom_buf_;
-    //     for (const auto gq7_odom : gq7_odom_buf_) {
-    //         logger_single(2, gq7_odom);
-    //     }
-    //     for (const auto eskf_odom : eskf_odom_buf_) {
-    //         logger_single(3, eskf_odom);
-    //     }
-    // }
-    // gq7_odom_buf_.clear();
-    // eskf_odom_buf_.clear();
+    current_changing_state = state_checker();
 }
 
-void SwitchingNode::state_publisher(const nav_msgs::OdometryConstPtr &sub_odom_msg) {
-    nav_msgs::Odometry pub_odom_msg = *sub_odom_msg;
+void SwitchingNode::gnss_status_callback(const std_msgs::Bool &gnss_status_msg) {
+    if(!gnss_status_msg.data) is_gnss_stable_ = false;
+    else is_gnss_stable_ = true;
+    
+    current_changing_state = state_checker();
+}
 
-    if (!is_stable_switching_){
-        // std::cout << "work" << std::endl;
-        pub_odom_msg = apply_kf(sub_odom_msg);
+void SwitchingNode::gq7_callback(const nav_msgs::OdometryConstPtr &gq7_msg) {
+    if (!is_initialized_gq7_) is_initialized_gq7_ = true;
+    gq7_odom = *gq7_msg;
+
+    Eigen::Quaterniond orientation(
+        gq7_msg->pose.pose.orientation.w,
+        gq7_msg->pose.pose.orientation.x,
+        gq7_msg->pose.pose.orientation.y,
+        gq7_msg->pose.pose.orientation.z
+    );
+
+    Eigen::Vector3d linear_vel(
+        gq7_msg->twist.twist.linear.x,
+        gq7_msg->twist.twist.linear.y,
+        gq7_msg->twist.twist.linear.z
+    );
+
+    Eigen::Vector3d transformed_vel = orientation * linear_vel;
+    gq7_odom.twist.twist.linear.x = transformed_vel.x();
+    gq7_odom.twist.twist.linear.y = transformed_vel.y();
+    gq7_odom.twist.twist.linear.z = transformed_vel.z();
+}
+
+void SwitchingNode::lio_callback(const nav_msgs::OdometryConstPtr &lio_msg) {
+    if (!is_initialized_lio_) is_initialized_lio_ = true;
+    lio_odom = *lio_msg; 
+}
+
+void SwitchingNode::eskf_callback(const nav_msgs::OdometryConstPtr &eskf_msg) {
+    if (!is_initialized_eskf_) is_initialized_eskf_ = true;
+    eskf_odom = *eskf_msg;
+}
+
+void SwitchingNode::state_publisher(const nav_msgs::Odometry &sub_odom_msg) {
+    nav_msgs::Odometry pub_odom_msg = sub_odom_msg;
+    geometry_msgs::PoseStamped pose_msg;
+    geometry_msgs::TwistStamped vel_msg;
+    odom_pub_.publish(pub_odom_msg);
+    pose_msg.header = pub_odom_msg.header;
+    pose_msg.header.frame_id = "map";
+    pose_msg.pose = pub_odom_msg.pose.pose;
+    vel_msg.header = pub_odom_msg.header;
+    vel_msg.twist = pub_odom_msg.twist.twist;
+    vel_msg.header.frame_id = "map";
+
+    odom_pub_.publish(pub_odom_msg);
+    pose_pub_.publish(pose_msg);
+    vel_pub_.publish(vel_msg);
+
+    // broadcast tf
+    if (pub_tf){
+        tf::Transform tf_transform;
+        tf_transform.setOrigin(tf::Vector3(
+            pub_odom_msg.pose.pose.position.x, 
+            pub_odom_msg.pose.pose.position.y, 
+            pub_odom_msg.pose.pose.position.z));
+
+        tf::Quaternion tf_quat(
+            pub_odom_msg.pose.pose.orientation.x,
+            pub_odom_msg.pose.pose.orientation.y,
+            pub_odom_msg.pose.pose.orientation.z,
+            pub_odom_msg.pose.pose.orientation.w);
+        
+        tf_transform.setRotation(tf_quat);
+        tf_broadcaster_.sendTransform(tf::StampedTransform(tf_transform, pub_odom_msg.header.stamp, frame_id, child_frame_id));
     }
+    prepare_kf(sub_odom_msg);
+}
+
+void SwitchingNode::kf_state_publisher(const nav_msgs::Odometry &sub_odom_msg) {
+    nav_msgs::Odometry pub_odom_msg = sub_odom_msg;
+    pub_odom_msg = apply_kf(sub_odom_msg);
+
 
     geometry_msgs::PoseStamped pose_msg;
     geometry_msgs::TwistStamped vel_msg;
@@ -339,94 +383,25 @@ void SwitchingNode::state_publisher(const nav_msgs::OdometryConstPtr &sub_odom_m
         tf_transform.setRotation(tf_quat);
         tf_broadcaster_.sendTransform(tf::StampedTransform(tf_transform, pub_odom_msg.header.stamp, frame_id, child_frame_id));
     }
-
-    if (is_stable_switching_){
-        prepare_kf(sub_odom_msg);
-    }
-
-    num_switching += 1;
-
-//     if (num_switching == num_switching_threshold){
-//         num_switching = 0;
-//         is_stable_ = !is_stable_;
-//         is_stable_switching_ = false;
-
-//         std::cout << is_stable_ << std::endl;
-//     }
 }
 
-
-void SwitchingNode::gq7_callback(const nav_msgs::OdometryConstPtr &gq7_msg) {
-    if (!is_initialized_gq7_) is_initialized_gq7_ = true;
-    gq7_odom = *gq7_msg;
-    gq7_odom_buf_.push_back(gq7_msg);
-    std::cout << gq7_odom_buf_.size() << std::endl;
-    if (is_stable_) {
-        nav_msgs::OdometryConstPtr odom_ptr;
-        // orientation을 이용하여 velocity를 회전시켜 할당
-        Eigen::Quaterniond orientation(
-            gq7_msg->pose.pose.orientation.w,
-            gq7_msg->pose.pose.orientation.x,
-            gq7_msg->pose.pose.orientation.y,
-            gq7_msg->pose.pose.orientation.z
-        );
-
-        Eigen::Vector3d linear_vel(
-            gq7_msg->twist.twist.linear.x,
-            gq7_msg->twist.twist.linear.y,
-            gq7_msg->twist.twist.linear.z
-        );
-
-        Eigen::Vector3d transformed_vel = orientation * linear_vel;
-
-        // transformed_vel을 새로운 메시지에 할당
-        nav_msgs::OdometryPtr transformed_odom = boost::make_shared<nav_msgs::Odometry>(*gq7_msg);
-        transformed_odom->twist.twist.linear.x = transformed_vel.x();
-        transformed_odom->twist.twist.linear.y = transformed_vel.y();
-        transformed_odom->twist.twist.linear.z = transformed_vel.z();
-        state_publisher(transformed_odom);
+void SwitchingNode::timerCallback(const ros::TimerEvent& event) {
+    if(!is_initialized_eskf_ && !is_initialized_lio_ && !is_initialized_gq7_) return;
+    if(current_state<0) return;
+    nav_msgs::Odometry pub_odom;
+    if(current_changing_state == 0){
+        if(current_state == CURRENTSTATEESKF) pub_odom = eskf_odom;
+        else if(current_state == CURRENTSTATEGQ7) pub_odom = gq7_odom;
+        else if(current_state == CURRENTSTATELIO) pub_odom = lio_odom;
+        else return;
+        state_publisher(pub_odom);
     }
-}
-
-void SwitchingNode::lio_callback(const nav_msgs::OdometryConstPtr &lio_msg) {
-    if (!is_initialized_lio_) is_initialized_lio_ = true;
-    lio_odom = *lio_msg;
-    lio_odom_buf_.push_back(lio_msg);
-    std::cout << lio_odom_buf_.size() << std::endl;
-    if (is_stable_) {
-        nav_msgs::OdometryConstPtr odom_ptr;
-        // orientation을 이용하여 velocity를 회전시켜 할당
-        Eigen::Quaterniond orientation(
-            lio_msg->pose.pose.orientation.w,
-            lio_msg->pose.pose.orientation.x,
-            lio_msg->pose.pose.orientation.y,
-            lio_msg->pose.pose.orientation.z
-        );
-
-        Eigen::Vector3d linear_vel(
-            lio_msg->twist.twist.linear.x,
-            lio_msg->twist.twist.linear.y,
-            lio_msg->twist.twist.linear.z
-        );
-
-        Eigen::Vector3d transformed_vel = orientation * linear_vel;
-
-        // transformed_vel을 새로운 메시지에 할당
-        nav_msgs::OdometryPtr transformed_odom = boost::make_shared<nav_msgs::Odometry>(*lio_msg);
-        transformed_odom->twist.twist.linear.x = transformed_vel.x();
-        transformed_odom->twist.twist.linear.y = transformed_vel.y();
-        transformed_odom->twist.twist.linear.z = transformed_vel.z();
-        state_publisher(transformed_odom);
-    }
-}
-
-void SwitchingNode::eskf_callback(const nav_msgs::OdometryConstPtr &eskf_msg) {
-    if (!is_initialized_eskf_) is_initialized_eskf_ = true;
-    eskf_odom = *eskf_msg;
-    eskf_odom_buf_.push_back(eskf_msg);
-
-    if (!is_stable_) {
-        state_publisher(eskf_msg);
+    else{
+        if(current_state == CURRENTSTATEESKF) pub_odom = eskf_odom;
+        else if(current_state == CURRENTSTATEGQ7) pub_odom = gq7_odom;
+        else if(current_state == CURRENTSTATELIO) pub_odom = lio_odom;
+        else return;
+        kf_state_publisher(pub_odom);
     }
 }
 }  // namespace ryu
