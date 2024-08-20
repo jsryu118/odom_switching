@@ -15,8 +15,9 @@ namespace ryu {
 class SwitchingNode {
    public:
     SwitchingNode(ros::NodeHandle &nh) {
-        std::string topic_status, topic_gq7, topic_eskf, topic_pubodom, topic_pubpose, topic_pubvel, log_path; 
-        nh.param<std::string>("topic_status", topic_status, "/ekf/status");
+        std::string topic_gq7_status, topic_lio_status, topic_gq7, topic_lio, topic_eskf, topic_pubodom, topic_pubpose, topic_pubvel, log_path; 
+        nh.param<std::string>("topic_gq7_status", topic_gq7_status, "/ekf/status");
+        nh.param<std::string>("topic_lio_status", topic_lio_status, "/ekf/status");
         nh.param<std::string>("topic_gq7", topic_gq7, "/ekf/odometry_map");
         nh.param<std::string>("topic_eskf", topic_eskf, "/eskf/odom");
         nh.param<std::string>("topic_pubodom", topic_pubodom, "/switching_result");
@@ -27,8 +28,10 @@ class SwitchingNode {
         nh.param("use_lidar_odom", use_lidar_odom, false);
 
         // ROS sub & pub
-        status_sub_ = nh.subscribe(topic_status, 10, &SwitchingNode::status_callback, this);
+        gq7_status_sub_ = nh.subscribe(topic_gq7_status, 10, &SwitchingNode::gq7_status_callback, this);
+        lio_status_sub_ = nh.subscribe(topic_lio_status, 10, &SwitchingNode::lio_status_callback, this);
         gq7_sub_ = nh.subscribe(topic_gq7, 10, &SwitchingNode::gq7_callback, this);
+        lio_sub_ = nh.subscribe(topic_lio, 10, &SwitchingNode::lio_callback, this);
         eskf_sub_ = nh.subscribe(topic_eskf, 10, &SwitchingNode::eskf_callback, this);
         odom_pub_ = nh.advertise<nav_msgs::Odometry>(topic_pubodom, 10);
 
@@ -71,9 +74,11 @@ class SwitchingNode {
         }
     }
 
-    void status_callback(const microstrain_inertial_msgs::HumanReadableStatusConstPtr &status_msg);
+    void gq7_status_callback(const microstrain_inertial_msgs::HumanReadableStatusConstPtr &gq7_status_msg);
+    void lio_status_callback(const microstrain_inertial_msgs::HumanReadableStatusConstPtr &lio_status_msg);
     void state_publisher(const nav_msgs::OdometryConstPtr &odom_msg);
     void gq7_callback(const nav_msgs::OdometryConstPtr &gq7_msg);
+    void lio_callback(const nav_msgs::OdometryConstPtr &lio_msg);
     void eskf_callback(const nav_msgs::OdometryConstPtr &eskf_msg);
     void logger(bool stable_flag);
     void logger_single(int state_flag, const nav_msgs::OdometryConstPtr &odom_msg);
@@ -83,8 +88,10 @@ class SwitchingNode {
     nav_msgs::Odometry apply_kf(const nav_msgs::OdometryConstPtr& odom_msg);
 
    private:
-    ros::Subscriber status_sub_;
+    ros::Subscriber gq7_status_sub_;
     ros::Subscriber gq7_sub_;
+    ros::Subscriber lio_status_sub_;
+    ros::Subscriber lio_sub_;
     ros::Subscriber eskf_sub_;
     ros::Publisher odom_pub_;
     ros::Publisher pose_pub_;
@@ -92,12 +99,14 @@ class SwitchingNode {
     tf::TransformBroadcaster tf_broadcaster_;
 
     bool is_initialized_gq7_ = false;
+    bool is_initialized_lio_ = false;
     bool is_initialized_eskf_ = false;
     bool is_stable_ = false;
     bool is_stable_switching_ = true;
 
     nav_msgs::Odometry gq7_odom;
     nav_msgs::Odometry eskf_odom;
+    nav_msgs::Odometry lio_odom;
     std::ofstream log_file_;
     int num_switching = 0;
     int num_switching_threshold = 300; // 100hz x 3sec
@@ -111,6 +120,7 @@ class SwitchingNode {
     std::string frame_id, child_frame_id;
 
     std::deque<nav_msgs::OdometryConstPtr> gq7_odom_buf_;
+    std::deque<nav_msgs::OdometryConstPtr> lio_odom_buf_;
     std::deque<nav_msgs::OdometryConstPtr> eskf_odom_buf_;
     bool is_stable_before_=false;
 
@@ -208,9 +218,9 @@ void SwitchingNode::logger_single(int state_flag, const nav_msgs::OdometryConstP
     }
 }
 
-void SwitchingNode::status_callback(const microstrain_inertial_msgs::HumanReadableStatusConstPtr &status_msg) {
-    int num_status = status_msg->status_flags.size();
-    std::string first_status = status_msg->status_flags[0];
+void SwitchingNode::gq7_status_callback(const microstrain_inertial_msgs::HumanReadableStatusConstPtr &gq7_status_msg) {
+    int num_status = gq7_status_msg->status_flags.size();
+    std::string first_status = gq7_status_msg->status_flags[0];
     std::string stable_status = "\"Stable\""; // 따옴표를 그대로 사용
     is_stable_before_ = is_stable_;
     if (num_status == 1 && first_status == stable_status) {
@@ -247,6 +257,47 @@ void SwitchingNode::status_callback(const microstrain_inertial_msgs::HumanReadab
     }
     gq7_odom_buf_.clear();
     eskf_odom_buf_.clear();
+}
+
+void SwitchingNode::lio_status_callback(const microstrain_inertial_msgs::HumanReadableStatusConstPtr &lio_status_msg) {
+    // int num_status = lio_status_msg->status_flags.size();
+    // std::string first_status = lio_status_msg->status_flags[0];
+    // std::string stable_status = "\"Stable\""; // 따옴표를 그대로 사용
+    // is_stable_before_ = is_stable_;
+    // if (num_status == 1 && first_status == stable_status) {
+    //     if (!is_stable_){
+    //         stable_count++;    
+    //     }
+    //     if (stable_count >= num_stable_threshold) {
+    //         if (!is_stable_){
+    //             is_stable_ = true;
+    //             is_stable_switching_ = false;
+    //         }
+    //     }
+    //     logger(is_stable_);
+
+    // } else {
+    //     stable_count = 0;
+    //     if (is_stable_){
+    //         is_stable_ = false;
+    //         is_stable_switching_ = false;
+    //     }
+    //     logger(is_stable_);
+    //     // std::cout << "unstable" << std::endl;
+    // }
+
+    // if(is_stable_before_ && !is_stable_){
+    //     auto gq7_buf_copy = gq7_odom_buf_;
+    //     auto eskf_buf_copy = eskf_odom_buf_;
+    //     for (const auto gq7_odom : gq7_odom_buf_) {
+    //         logger_single(2, gq7_odom);
+    //     }
+    //     for (const auto eskf_odom : eskf_odom_buf_) {
+    //         logger_single(3, eskf_odom);
+    //     }
+    // }
+    // gq7_odom_buf_.clear();
+    // eskf_odom_buf_.clear();
 }
 
 void SwitchingNode::state_publisher(const nav_msgs::OdometryConstPtr &sub_odom_msg) {
@@ -337,10 +388,42 @@ void SwitchingNode::gq7_callback(const nav_msgs::OdometryConstPtr &gq7_msg) {
     }
 }
 
+void SwitchingNode::lio_callback(const nav_msgs::OdometryConstPtr &lio_msg) {
+    if (!is_initialized_lio_) is_initialized_lio_ = true;
+    lio_odom = *lio_msg;
+    lio_odom_buf_.push_back(lio_msg);
+    std::cout << lio_odom_buf_.size() << std::endl;
+    if (is_stable_) {
+        nav_msgs::OdometryConstPtr odom_ptr;
+        // orientation을 이용하여 velocity를 회전시켜 할당
+        Eigen::Quaterniond orientation(
+            lio_msg->pose.pose.orientation.w,
+            lio_msg->pose.pose.orientation.x,
+            lio_msg->pose.pose.orientation.y,
+            lio_msg->pose.pose.orientation.z
+        );
+
+        Eigen::Vector3d linear_vel(
+            lio_msg->twist.twist.linear.x,
+            lio_msg->twist.twist.linear.y,
+            lio_msg->twist.twist.linear.z
+        );
+
+        Eigen::Vector3d transformed_vel = orientation * linear_vel;
+
+        // transformed_vel을 새로운 메시지에 할당
+        nav_msgs::OdometryPtr transformed_odom = boost::make_shared<nav_msgs::Odometry>(*lio_msg);
+        transformed_odom->twist.twist.linear.x = transformed_vel.x();
+        transformed_odom->twist.twist.linear.y = transformed_vel.y();
+        transformed_odom->twist.twist.linear.z = transformed_vel.z();
+        state_publisher(transformed_odom);
+    }
+}
+
 void SwitchingNode::eskf_callback(const nav_msgs::OdometryConstPtr &eskf_msg) {
     if (!is_initialized_eskf_) is_initialized_eskf_ = true;
     eskf_odom = *eskf_msg;
-    gq7_odom_buf_.push_back(eskf_msg);
+    eskf_odom_buf_.push_back(eskf_msg);
 
     if (!is_stable_) {
         state_publisher(eskf_msg);
